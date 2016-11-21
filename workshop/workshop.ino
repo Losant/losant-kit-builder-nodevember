@@ -90,7 +90,7 @@ void connect() {
     delay(500);
     Serial.println("...");
     // Only try for 5 seconds.
-    if(millis() - wifiConnectStart > 10000) {
+    if(millis() - wifiConnectStart > 15000) {
       Serial.println("Failed to connect to WiFi");
       Serial.println("Please attempt to send updated configuration parameters.");
       deviceConfigured = false;
@@ -177,7 +177,7 @@ void connect() {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   Serial.setTimeout(2000);
 
   // 6 config fields each given 120 characters.
@@ -292,9 +292,9 @@ void loop() {
     tempCount = 0;
   }
 
-  timeSinceLastRead += 100;
+  timeSinceLastRead += 50;
 
-  delay(100);
+  delay(50);
 }
 
 // Saves the config to EEPROM.
