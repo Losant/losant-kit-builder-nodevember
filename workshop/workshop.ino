@@ -9,18 +9,28 @@
 
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
+#include <EEPROM.h>
 #include <Losant.h>
 
-// WiFi credentials.
-const char* WIFI_SSID = "my-wifi-ssid";
-const char* WIFI_PASS = "my-wifi-pass";
+// Configuration parameters.
+// These are sent over serial in JSON format.
+// They are saved to EEPROM and read on each boot.
+String configWifiSSID;
+String configWifiPass;
+String configDeviceId;
+String configAccessKey;
+String configAccessSecret;
+String configTmpEnabled; // whether or not to read temperature
 
-// Losant credentials.
-const char* LOSANT_DEVICE_ID = "my-device-id";
-const char* LOSANT_ACCESS_KEY = "my-access-key";
-const char* LOSANT_ACCESS_SECRET = "my-access-secret";
-
-const char* LOSANT_ENABLE_TMP = "false";
+// Above config is defined using the JSON spec below:
+// {
+//  "losant-config-wifi-ssid": "my-wifi-ssid",
+//  "losant-config-wifi-pass": "my-wifi-pass",
+//  "losant-config-device-id": "my-device-id",
+//  "losant-config-access-key": "my-access-key",
+//  "losant-config-access-secret": "my-access-secret",
+//  "losant-config-tmp": false | false
+//  }
 
 const int BUTTON_PIN = 5;
 const int LED_PIN = 4;
@@ -52,31 +62,40 @@ void connect() {
   Serial.println();
   Serial.println();
   Serial.print("Connecting to ");
-  Serial.println(WIFI_SSID);
+  Serial.println(configWifiSSID);
 
   // WiFi fix: https://github.com/esp8266/Arduino/issues/2186
   WiFi.persistent(false);
   WiFi.mode(WIFI_OFF);
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.begin(configWifiSSID.c_str(), configWifiPass.c_str());
+
+  unsigned long wifiConnectStart = millis();
 
   while (WiFi.status() != WL_CONNECTED) {
     // Check to see if
     if (WiFi.status() == WL_CONNECT_FAILED) {
-      Serial.println("Failed to connect to WIFI. Please verify credentials: ");
+      Serial.println("Failed to connect to WiFi. Please verify credentials: ");
       Serial.println();
       Serial.print("SSID: ");
-      Serial.println(WIFI_SSID);
+      Serial.println(configWifiSSID);
       Serial.print("Password: ");
-      Serial.println(WIFI_PASS);
+      Serial.println(configWifiPass);
       Serial.println();
       Serial.println("Trying again...");
-      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      WiFi.begin(configWifiSSID.c_str(), configWifiPass.c_str());
       delay(10000);
     }
 
     delay(500);
     Serial.println("...");
+    // Only try for 5 seconds.
+    if(millis() - wifiConnectStart > 15000) {
+      Serial.println("Failed to connect to WiFi");
+      Serial.println("Please attempt to send updated configuration parameters.");
+      deviceConfigured = false;
+      return;
+    }
   }
 
   Serial.println("");
@@ -105,9 +124,9 @@ void connect() {
 
   StaticJsonBuffer<200> jsonBuffer;
   JsonObject& root = jsonBuffer.createObject();
-  root["deviceId"] = LOSANT_DEVICE_ID;
-  root["key"] = LOSANT_ACCESS_KEY;
-  root["secret"] = LOSANT_ACCESS_SECRET;
+  root["deviceId"] = configDeviceId.c_str();
+  root["key"] = configAccessKey.c_str();
+  root["secret"] = configAccessSecret.c_str();
   String buffer;
   root.printTo(buffer);
 
@@ -127,21 +146,26 @@ void connect() {
       }
       Serial.println("Current Credentials: ");
       Serial.println("Device id: ");
-      Serial.println(LOSANT_DEVICE_ID);
+      Serial.println(configDeviceId);
       Serial.println("Access Key: ");
-      Serial.println(LOSANT_ACCESS_KEY);
+      Serial.println(configAccessKey);
       Serial.println("Access Secret: ");
-      Serial.println(LOSANT_ACCESS_SECRET);
+      Serial.println(configAccessSecret);
+      Serial.println("Please attempt to send updated configuration parameters.");
+      deviceConfigured = false;
+      return;
     }
   } else {
     Serial.println("Failed to connect to Losant API.");
-
+    Serial.println("Please attempt to send updated configuration parameters.");
+    deviceConfigured = false;
+    return;
   }
 
   http.end();
 
-  device.setId(LOSANT_DEVICE_ID);
-  device.connectSecure(wifiClient, LOSANT_ACCESS_KEY, LOSANT_ACCESS_SECRET);
+  device.setId(configDeviceId.c_str());
+  device.connectSecure(wifiClient, configAccessKey.c_str(), configAccessSecret.c_str());
 
   while (!device.connected()) {
     delay(1000);
@@ -153,15 +177,27 @@ void connect() {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
+  Serial.setTimeout(2000);
 
-  // Giving it a little time because the serial monitor doesn't
-  // immediately attach. Want the workshop that's running to
-  // appear on each upload.
-  delay(2000);
+  // 6 config fields each given 120 characters.
+  EEPROM.begin(721);
 
-  Serial.println();
-  Serial.println("Running Workshop 3 Firmware. Waiting for config...");
+  // Wait for serial to initialize.
+  while(!Serial) { }
+
+  Serial.println("Device Started");
+  Serial.println("-------------------------------------");
+  Serial.println("Running Nodevember Workshop Firmware!");
+  Serial.println("-------------------------------------");
+
+  if(EEPROM.read(720) != 88) {
+    Serial.println("Config has not yet been stored. Please send configuration parameters.");
+    return;
+  }
+
+  getConfig();
+  deviceConfigured = true;
 
   pinMode(BUTTON_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
@@ -177,11 +213,19 @@ void buttonPressed() {
 }
 
 void reportTemp(double degreesC, double degreesF) {
-  StaticJsonBuffer<200> jsonBuffer;
-  JsonObject& root = jsonBuffer.createObject();
-  root["tempC"] = degreesC;
-  root["tempF"] = degreesF;
-  device.sendState(root);
+  if(configTmpEnabled.compareTo("true") == 0) {
+    Serial.println();
+    Serial.print("Temperature C: ");
+    Serial.println(degreesC);
+    Serial.print("Temperature F: ");
+    Serial.println(degreesF);
+    Serial.println();
+    StaticJsonBuffer<200> jsonBuffer;
+    JsonObject& root = jsonBuffer.createObject();
+    root["tempC"] = degreesC;
+    root["tempF"] = degreesF;
+    device.sendState(root);
+  }
 }
 
 int buttonState = 0;
@@ -195,39 +239,7 @@ void loop() {
   bool toReconnect = false;
 
   if (Serial.available() > 0) {
-    Serial.println("");
-    Serial.println("Recieved Serial input. Parseing as JSON: ");
-    DynamicJsonBuffer jsonBuffer;
-    String byteRead = Serial.readString();
-    JsonObject& root = jsonBuffer.parseObject(byteRead);
-    root.printTo(Serial);
-    Serial.println();
-    
-    if (root.containsKey("losant-config-wifi-ssid")) {
-      setConfig("losant-config-wifi-ssid", (const char*) root["losant-config-wifi-ssid"], WIFI_SSID);
-    }
-
-    if (root.containsKey("losant-config-wifi-pass")) {
-      setConfig("losant-config-wifi-pass", (const char*) root["losant-config-wifi-pass"], WIFI_PASS);
-    }
-
-    if (root.containsKey("losant-config-device-id")) {
-      setConfig("losant-config-device-id", (const char*) root["losant-config-device-id"], LOSANT_DEVICE_ID);
-    }
-
-    if (root.containsKey("losant-config-access-key")) {
-      setConfig("losant-config-access-key", (const char*) root["losant-config-access-key"], LOSANT_ACCESS_KEY);
-    }
-
-    if (root.containsKey("losant-config-access-secret")) {
-      setConfig("losant-config-access-secret", (const char*) root["losant-config-access-secret"], LOSANT_ACCESS_SECRET);
-    }
-    
-    if (root.containsKey("losant-config-tmp")) {
-      setConfig("losant-config-tmp", (const char*) root["losant-config-tmp"], LOSANT_ENABLE_TMP);
-    }
-
-    deviceConfigured = true;
+    saveConfig();
     connect();
   }
 
@@ -262,52 +274,134 @@ void loop() {
   }
 
   tempSum += analogRead(A0);
-    tempCount++;
+  tempCount++;
 
-    // Report every 15 seconds.
-    if (timeSinceLastRead > 15000) {
-      // Take the average reading over the last 15 seconds.
-      double raw = (double)tempSum / (double)tempCount;
+  // Report every 15 seconds.
+  if (timeSinceLastRead > 15000) {
+    // Take the average reading over the last 15 seconds.
+    double raw = (double)tempSum / (double)tempCount;
 
-      // The tmp36 documentation requires the -0.5 offset, but during
-      // testing while attached to the Feather, all tmp36 sensors
-      // required a -0.52 offset for better accuracy.
-      double degreesC = (((raw / 1024.0) * 3.2) - 0.5) * 100.0;
-      double degreesF = degreesC * 1.8 + 32;
+    // The tmp36 documentation requires the -0.5 offset, but during
+    // testing while attached to the Feather, all tmp36 sensors
+    // required a -0.52 offset for better accuracy.
+    double degreesC = (((raw / 1024.0) * 3.2) - 0.5) * 100.0;
+    double degreesF = degreesC * 1.8 + 32;
 
-      Serial.println();
-      Serial.print("Temperature C: ");
-      Serial.println(degreesC);
-      Serial.print("Temperature F: ");
-      Serial.println(degreesF);
-      Serial.println();
+    reportTemp(degreesC, degreesF);
 
-      reportTemp(degreesC, degreesF);
-
-      timeSinceLastRead = 0;
-      tempSum = 0;
-      tempCount = 0;
-    }
-
-    timeSinceLastRead += 100;
-
-  delay(100);
-}
-
-void setConfig(String configName, const char* value, const char* &variable) {
-  Serial.println();
-  bool isEmpty = value ? 0 : 1;
-
-  if (isEmpty) {
-    Serial.println("ERROR Setting Config. Value is empty:  ");
-    Serial.println(configName);
-    return;
+    timeSinceLastRead = 0;
+    tempSum = 0;
+    tempCount = 0;
   }
-  Serial.print("Setting ");
-  Serial.print(configName);
-  Serial.print(" to ");
-  Serial.print(value);
 
+  timeSinceLastRead += 50;
 
-  variable = value;
+  delay(50);
 }
+
+// Saves the config to EEPROM.
+void saveConfig() {
+
+  Serial.println("");
+  Serial.println("Received Serial input. Parsing as JSON: ");
+  DynamicJsonBuffer jsonBuffer;
+  String byteRead = Serial.readString();
+  Serial.println(byteRead);
+  JsonObject& root = jsonBuffer.parseObject(byteRead);
+  root.printTo(Serial);
+  Serial.println();
+
+  if(root.containsKey("losant-config-clear")) {
+    if(String((const char*) root["losant-config-clear"]).compareTo("true") == 0) {
+      Serial.println("Clearing config from EEPROM and restarting board.");
+      EEPROM.write(720, 0);
+      EEPROM.commit();
+      EEPROM.end();
+      ESP.restart();
+      return;
+    }
+  }
+  
+  if (root.containsKey("losant-config-wifi-ssid")) {
+    saveConfigValue(String((const char*) root["losant-config-wifi-ssid"]), 0);
+  }
+
+  if (root.containsKey("losant-config-wifi-pass")) {
+    saveConfigValue(String((const char*) root["losant-config-wifi-pass"]), 120);
+  }
+
+  if (root.containsKey("losant-config-device-id")) {
+    saveConfigValue(String((const char*) root["losant-config-device-id"]), 240);
+  }
+
+  if (root.containsKey("losant-config-access-key")) {
+    saveConfigValue(String((const char*) root["losant-config-access-key"]), 360);
+  }
+
+  if (root.containsKey("losant-config-access-secret")) {
+    saveConfigValue(String((const char*) root["losant-config-access-secret"]), 480);
+  }
+  
+  if (root.containsKey("losant-config-tmp")) {
+    saveConfigValue(String((const char*) root["losant-config-tmp"]), 600);
+  }
+
+  Serial.println("Config saved. Restarting device.");
+  // Special number 88 and index 720 means we have config to read.
+  EEPROM.write(720, 88);
+  EEPROM.commit();
+  ESP.restart();
+}
+
+void saveConfigValue(String value, int addr) {
+  byte val[120];
+  value.getBytes(val, sizeof(val));
+  for(int i = 0; i < value.length(); i++) {
+    EEPROM.write(addr, val[i]);
+    addr++;
+  }
+  // null terminate the string.
+  EEPROM.write(addr, 0);
+}
+
+void getConfig() {
+
+  Serial.println("Attempting to read config from EEPROM.");
+  
+  configWifiSSID = getConfigValue(0);
+  configWifiPass = getConfigValue(120);
+  configDeviceId = getConfigValue(240);
+  configAccessKey = getConfigValue(360);
+  configAccessSecret = getConfigValue(480);
+  configTmpEnabled = getConfigValue(600);
+
+  Serial.println("Configuration loaded.");
+  Serial.print("WiFi SSID: ");
+  Serial.println(configWifiSSID);
+  Serial.print("WiFi Pass: ");
+  Serial.println(configWifiPass);
+  Serial.print("Device ID: ");
+  Serial.println(configDeviceId);
+  Serial.print("Access Key: ");
+  Serial.println(configAccessKey);
+  Serial.print("Access Secret: ");
+  Serial.println(configAccessSecret);
+  Serial.print("Temperature enabled: ");
+  Serial.println(configTmpEnabled);
+}
+
+String getConfigValue(int addr) {
+  byte val[120];
+  for(int i = 0; i < 120; i++) {
+    byte result = EEPROM.read(addr + i);
+    val[i] = result;
+    
+    if(result == 0) {
+      return String((char*)val);
+    }
+  }
+
+  Serial.println("Failed to read config value.");
+  return String("");
+}
+
