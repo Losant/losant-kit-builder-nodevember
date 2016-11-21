@@ -186,8 +186,10 @@ void setup() {
   // Wait for serial to initialize.
   while(!Serial) { }
 
-  Serial.println();
+  Serial.println("Device Started");
+  Serial.println("-------------------------------------");
   Serial.println("Running Nodevember Workshop Firmware!");
+  Serial.println("-------------------------------------");
 
   if(EEPROM.read(720) != 88) {
     Serial.println("Config has not yet been stored. Please send configuration parameters.");
